@@ -1,0 +1,55 @@
+---
+title: "Effects in SDs"
+format: html
+editor: visual
+---
+
+## Quarto
+
+```{r}
+
+CalculatePooledSD <- function(n1, n2, sd1, sd2) {
+  pooled_sd <- sqrt(
+    ((n1 - 1) * sd1^2 + (n2 - 1) * sd2^2) /
+      (n1 + n2 - 2)
+    )
+  return(pooled_sd)
+}
+
+# Calculation of pooled SD for ICG
+d_icg <-  d %>%
+  dplyr::filter(
+    severity_grief_measure_cont == "ICG (Inventory of Complicated Grief)"
+  ) %>% 
+  dplyr::mutate(
+    pooled_sd = 
+      CalculatePooledSD(
+        n1 = severity_grief_n_ctrl_cont,
+        n2 = severity_grief_n_int_cont,
+        sd1 = severity_grief_SD_ctrl_cont,
+        sd2 = severity_grief_SD_int_cont
+      ),
+    pooled_var = pooled_sd^2
+  ) 
+
+mean_sd <- d_icg %>% dplyr::ungroup() %>% dplyr::summarise(m = sqrt(mean(pooled_var, na.rm = TRUE)))
+
+effect <- mean_sd * 0.93
+
+lower_ci <- mean_sd * 0.62
+upper_ci <- mean_sd * 1.23
+
+effect
+lower_ci
+upper_ci
+
+```
+
+You can add options to executable code like this
+
+```{r}
+#| echo: false
+2 * 2
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).

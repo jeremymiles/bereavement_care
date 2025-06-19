@@ -1,0 +1,755 @@
+---
+title: "Bereavement Analysis"
+format:
+  html:
+    embed-resources: true
+editor: visual
+---
+
+```{r}
+
+
+library(dplyr)
+library(glue)
+library(knitr)
+library(metafor)
+library(quarto)
+library(stringr)
+
+
+load("kq.RData")
+
+setwd(
+  file_location
+)
+
+GetExpCoefs <- function(fit) {
+  cat("Estimate: ", round(exp(fit$b), 3), "\n")
+  cat("Lower CI: ", round(exp(fit$ci.lb), 3), "\n")
+  cat("Upper CI: ", round(exp(fit$ci.ub), 3), "\n")
+  return(invisible(NULL))
+}
+
+cat("Check we have the right things.\n")
+cat("Intervention: ", intervention, "\n")
+table(d$KQ3)
+table(d$KQ4)
+table(d$intervention_type)
+
+d <- d %>% 
+  dplyr::mutate(
+    ID = stringr::str_to_title(ID)
+  ) %>%
+  dplyr::arrange(ID) %>%
+  dplyr::mutate(
+    expected = ifelse(Expected.death == "Expected death", 1,
+                      ifelse(Unexpected.death == "Unexpected death", 0, NA)),
+    violent =  
+      ifelse(Violent.death == "Violent death", 1,
+             ifelse(Not.violent.death == "Not violent death", 0, NA)),
+    adult = ifelse(age_subgroup_participants == "Adults", 1,
+                   ifelse(age_subgroup_participants == "Pediatrics", 0, NA)),
+    location_us = ifelse(location == "US", 1,
+                         ifelse(location == "", NA, 0)),
+    death_setting = ifelse(
+      death_setting %in% c("Home", "Hospice", "Hospital"), death_setting, NA
+    ),
+    death_setting = 
+      ifelse(death_setting == "Hospital", "At Hospital", death_setting),
+    intervention_setting = 
+      ifelse(
+        setting %in% c(
+          "Community", "Hospital", "Online", "Outpatient"
+        ), setting, NA
+      ),
+    child_parent_spouse = 
+      ifelse(
+        Parent == "Parent" & Child == "" & Spouse == "", "Parent",
+        ifelse(
+          Parent == "" & Child == "Child" & Spouse == "", "Child", 
+          ifelse(
+            Parent == "" & Child == "" & Spouse == "Spouse", "Spouse", NA
+          )
+        )
+      )
+  )
+```
+
+```{r Analysis_Function}
+
+
+RunAnalysis <- function(
+    current_data, 
+    outcome_description, 
+    outcome_measure, 
+    categorical = FALSE) {
+
+  mod_vars_list <- list(
+    c("CG", "Complicated Grief"),
+    c("age_deceased", "Age Deceased"),
+    c("expected", "Expected Death"), 
+    c("violent", "Violent Death"),
+    c("percent_female", "Percent Female"),
+    c("adult", "Adult"),
+    c("location_us", "Location in US"),
+    c("death_setting", "Death Setting"),
+    c("intervention_setting", "Intervention Setting"),
+    c("Anticipatory.death", "Anticipatory"),
+    c("child_parent_spouse", "Parent, Child or Spouse")
+  )
+  #If grief or CG, remove complicated grief
+  if(title == "Grief" | title == "Complicated grief") {
+    mod_vars_list <- mod_vars_list[-1]
+  }
+  
+  mod_vars <- 
+    lapply(mod_vars_list, function(x) { return(x[[1]][[1]])}) %>%
+    unlist()
+  
+  current_data <- current_data %>%
+    dplyr::select(
+      yi, vi, ID, Refid, all_of(outcome_measure), 
+      all_of(mod_vars), ni, comparator
+    ) %>%
+    dplyr::filter(!is.na(yi), !is.na(vi))
+  
+  cat(glue::glue("\n\n**************", outcome_description, "*********\n\n" ))
+  
+  if (nrow(current_data) == 0) {
+    cat(glue::glue("No studies for {outcome_description}.\n\n"))
+    return(invisible(NULL))
+  }
+  
+  
+  
+  cat(
+    glue::glue(
+      "Total N: {sum(current_data$ni, na.rm = TRUE)}\n\n"
+    )
+  )
+  
+  cat(glue::glue("Number of studies with n: {sum(!is.na(current_data$yi))}\n\n"))
+  
+  cat("\n")
+  
+  
+  mod_vars <- 
+    lapply(mod_vars_list, function(x) { return(x[[1]][[1]])}) %>%
+    unlist()
+  
+  current_data <- current_data %>%
+    dplyr::select(
+      ID, Refid, all_of(outcome_measure), yi, vi, 
+      all_of(mod_vars), comparator
+    )
+  
+  current_data %>%
+    dplyr::filter(!is.na(yi)) %>%
+    dplyr::select(ID, all_of(outcome_measure), comparator) %>% 
+    knitr::kable() %>% print()
+  
+  
+  cat("\n")
+  
+  # print IDs
+  current_data %>%
+    dplyr::select(Refid) %>%
+    dplyr::arrange(Refid) %>%
+    dplyr::mutate(Refid = paste0("{#", Refid, "}")) %>%
+    unlist() %>%
+    paste(collapse = '') %>% cat()
+  
+  cat("\n")
+  
+  fit_model <-  
+    metafor::rma(yi = yi, vi = vi, data = current_data,
+                 test="knha", slab = ID)
+  
+  print(fit_model)
+  if (categorical) {
+    GetExpCoefs(fit_model)
+    forest(fit_model, atransf = exp,
+           xlab = "Relative Risk", refline = 0,
+           mlab = "")
+  } else {
+    forest(fit_model, mlab = "", xlab = "Standardized Mean Difference")
+  }
+  
+  
+  
+  if (nrow(current_data) >= 3) {
+    cat("Egger test")
+    print(metafor::regtest(fit_model))
+    cat("Begg test")
+    print(metafor::ranktest(fit_model))
+    cat("Trim and Fill\n")
+    print(metafor::trimfill(fit_model))
+  } else {
+    cat("Not enough data for bias tests and trim/fill.\n")
+  }
+  
+  # If intervention is all, do the subsets.
+  if (intervention == "all") {
+    
+    for (m in seq_along(mod_vars)) {
+      cat("\n\n** ", mod_vars_list[m][[1]][[2]], " **\n\n")
+      
+      mod_var_from_list <- mod_vars[m]
+      
+      current_data_subset <- current_data %>%
+        dplyr::filter(!is.na(mod_var_from_list)) 
+      current_data_subset$mod_var <- current_data[[mod_var_from_list]]
+      
+      current_data_subset <- current_data_subset %>%
+        dplyr::filter(!is.na(mod_var), mod_var != "N/A")
+      
+      # tests for enough data
+      test_1 <- (
+        length(unique(current_data_subset$mod_var)) <
+          nrow(current_data_subset)) | 
+        class(current_data_subset$mod_var) != "character"
+      test_2 <- nrow(current_data_subset) > 2 & 
+        length(unique(current_data_subset$mod_var)) > 1
+      if (test_1 & test_2) {
+        current_data_subset %>%
+          dplyr::group_by(mod_var) %>%
+          dplyr::summarise(n_studies = dplyr::n()) %>%
+          dplyr::mutate(percent = (n_studies / sum(n_studies)) * 100)  %>%
+          knitr::kable() %>% print()
+        
+        
+        fit_model_mod <-  
+          metafor::rma(yi = yi, vi = vi, data = current_data_subset,
+                       test="knha", slab = ID, mods = ~ mod_var)
+        print(fit_model_mod)
+        
+        if (categorical) {
+          GetExpCoefs(fit_model_mod)
+        }
+      } else {
+        cat(
+          glue::glue(
+            "Not enough data for moderator analysis {mod_vars_list[m][[1]][[2]]}"
+          )
+        )
+      }
+    }
+  }
+}  
+
+
+```
+
+*Incidence of grief disorder: Incidence*
+
+*Severity of grief disorder: Severity*
+
+*Grief symptoms: Symptoms*
+
+*Quality of life: QoL*
+
+*Loneliness: Loneliness*
+
+*Suicide*
+
+*Adverse health behaviors*
+
+*Depression*
+
+*Substance use:*
+
+*Unintended consequences: AE*
+
+*\## Incidence of grief disorder: Incidence - Continuous*
+
+```{r}
+
+outcome_description <- "Grief Disorder"
+outcome_measure <- "grief_symp_measure_cont"
+
+d_grief_disorder_incidence <- metafor::escalc(
+  m1i = incidence_grief_mean_int_cont,
+  sd1i = incidence_grief_SD_int_cont,
+  n1i = incidence_grief_n_int_cont,
+  m2i = incidence_grief_mean_comp_cont,
+  sd2i = incidence_grief_SD_comp_cont,
+  n2i = incidence_grief_n_comp_cont,
+  append = TRUE,
+  measure = "SMD",
+  data = d)
+
+d_grief_disorder_incidence$ni <- attr(d_grief_disorder_incidence$yi, which = 'ni')
+
+
+RunAnalysis(current_data = d_grief_disorder_incidence, 
+            outcome_description = "Grief Disorder",
+            outcome_measure = "grief_symp_measure_cont")
+
+rm(d_grief_disorder_incidence)
+
+```
+
+*\## Incidence of grief disorder: Incidence: Categorical*
+
+```{r}
+d_incidence_grief_cat <- 
+  metafor::escalc(
+    ai = incidence_grief_counts_int_categ,
+    bi = incidence_grief_n_int_categ - incidence_grief_counts_int_categ,
+    ci = incidence_grief_counts_comp_categ,
+    di = incidence_grief_n_comp_categ - incidence_grief_counts_comp_categ,
+    measure = "RR",
+    add = TRUE,
+    data = d
+  )
+
+d_incidence_grief_cat$ni <- attr(d_incidence_grief_cat$yi, which = 'ni')
+
+d_incidence_grief_cat$yi <- ifelse(
+  d_incidence_grief_cat$incidence_grief_value_categ == "Higher is better", 
+  d_incidence_grief_cat$yi * -1,
+  d_incidence_grief_cat$yi
+)
+
+RunAnalysis(
+  d_incidence_grief_cat, 
+  outcome_description = "Incidence of Grief Disorder: Categorical",
+  outcome_measure = "incidence_grief_measure_categ",
+  categorical = TRUE
+)
+
+rm(d_incidence_grief_cat)
+```
+
+*\## Severity of grief disorder: Severity: Continuous*
+
+```{r}
+d_severity_grief <- metafor::escalc(
+  m1i = severity_grief_mean_int_cont,
+  sd1i = severity_grief_SD_int_cont,
+  n1i = severity_grief_n_int_cont,
+  m2i = severity_grief_mean_comp_cont,
+  sd2i = severity_grief_SD_comp_cont,
+  n2i = severity_grief_n_comp_cont,
+  append = TRUE,
+  measure = "SMD",
+  data = d
+)
+
+d_severity_grief$ni <- attr(d_severity_grief$yi, which = 'ni')
+
+RunAnalysis(current_data = d_severity_grief, 
+            outcome_description ="Severity of grief disorder",
+            outcome_measure = "severity_grief_measure_cont")
+
+rm(d_severity_grief)
+```
+
+*\## Severity of grief disorder: Severity: Categorical*
+
+*No control*
+
+```{r}
+
+
+d_severity_grief_cat <- 
+  metafor::escalc(
+    ai = severity_grief_counts_int_categ,
+    bi = severity_grief_n_int_categ - severity_grief_counts_int_categ,
+    ci = severity_grief_counts_comp_categ,
+    di = severity_grief_n_comp_categ - severity_grief_counts_comp_categ,
+    measure = "RR",
+    add = TRUE,
+    data = d
+  )
+
+d_severity_grief_cat$ni <- attr(d_severity_grief_cat$yi, which = 'ni')
+
+d_severity_grief_cat$yi <- ifelse(
+  d_severity_grief_cat$severity_grief_value_categ   == "Higher is better", 
+  d_severity_grief_cat$yi * -1,
+  d_severity_grief_cat$yi
+)
+
+
+RunAnalysis(
+  current_data = d_severity_grief_cat, 
+  outcome_description = "Severity of Grief Disorder",
+  outcome_measure = "severity_grief_measure_categ",
+  categorical = TRUE
+)
+
+rm(d_severity_grief_cat)
+```
+
+*\## Grief symptoms: Symptoms*
+
+```{r}
+d_grief_symp <- metafor::escalc(
+  m1i = grief_symp_mean_int_cont,
+  sd1i = grief_symp_SD_int_cont,
+  n1i = grief_symp_n_int_cont,
+  m2i = grief_symp_mean_comp_cont,
+  sd2i = grief_symp_SD_comp_cont,
+  n2i = grief_symp_n_comp_cont,
+  append = TRUE,
+  measure = "SMD",
+  data = d
+)
+
+d_grief_symp$ni <- attr(d_grief_symp$yi, which = 'ni')
+
+d_grief_symp$yi <- ifelse(
+  d_grief_symp$grief_symp_value == "Higher is better", 
+  d_grief_symp$yi * -1,
+  d_grief_symp$yi
+)
+
+RunAnalysis(
+  current_data = d_grief_symp, 
+  outcome_description = "Grief Symptoms",
+  outcome_measure = "grief_symp_measure_cont"
+)
+
+rm(d_grief_symp)
+
+```
+
+*\## Grief symptoms: Symptoms Categorical*
+
+```{r}
+d_grief_symp_cat <-
+  metafor::escalc(
+    ai = grief_symp_counts_int_categ,
+    bi = grief_symp_n_int_categ - grief_symp_counts_int_categ,
+    ci = grief_symp_counts_comp_categ,
+    di = grief_symp_n_comp_categ - grief_symp_counts_comp_categ,
+    measure = "RR",
+    add = TRUE,
+    data = d
+  )
+
+d_grief_symp_cat$ni <- attr(d_grief_symp_cat$yi, which = 'ni')
+
+d_grief_symp_cat$yi <- ifelse(
+  d_grief_symp_cat$grief_symp_value_categ == "Higher is better", 
+  d_grief_symp_cat$yi * -1,
+  d_grief_symp_cat$yi
+)
+
+
+RunAnalysis(
+  d_grief_symp_cat, 
+  outcome_description = "Grief Symptoms: Categorical",
+  outcome_measure = "grief_symp_measure_categ",
+  categorical = TRUE
+)
+
+rm(d_grief_symp_cat)
+```
+
+*\## Quality of life: QoL Continuous*
+
+```{r}
+
+d_qol <- metafor::escalc(
+  m1i = qol_mean_int_cont,
+  sd1i = qol_SD_int_cont,
+  n1i = qol_n_int_cont,
+  m2i = qol_mean_comp_cont,
+  sd2i = qol_SD_comp_cont,
+  n2i = qol_n_comp_cont,
+  append = TRUE,
+  measure = "SMD",
+  data = d
+)
+
+d_qol$ni <- attr(d_qol$yi, which = 'ni')
+
+RunAnalysis(
+  d_qol, 
+  outcome_description = "QoL Continuous",
+  outcome_measure = "qol_measure_cont"
+)
+
+rm(d_qol)
+```
+
+*\## Quality of life: QoL Categorical*
+
+```{r}
+d_qol_cat <-
+  metafor::escalc(
+    ai = qol_counts_int_categ,
+    bi = qol_n_int_categ - qol_counts_int_categ,
+    ci = qol_counts_comp_categ,
+    di = qol_n_comp_categ - qol_counts_comp_categ,
+    measure = "RR",
+    add = TRUE,
+    data = d
+  )
+
+
+d_qol_cat$ni <- attr(d_qol_cat$yi, which = 'ni')
+
+RunAnalysis(
+  d_qol_cat, 
+  outcome_description = "QoL Categorical",
+  outcome_measure = "qol_measure_categ",
+  categorical = TRUE
+)
+
+rm(d_qol_cat)
+```
+
+*\## Loneliness: Loneliness: Continuous*
+
+```{r}
+d_loneliness <- metafor::escalc(
+  m1i = loneliness_mean_int_cont,
+  sd1i = loneliness_SD_int_cont,
+  n1i = loneliness_n_int_cont,
+  m2i = loneliness_mean_comp_cont,
+  sd2i = loneliness_SD_comp_cont,
+  n2i = loneliness_n_comp_cont,
+  append = TRUE,
+  measure = "SMD",
+  data = d
+)
+
+
+d_loneliness$ni <- attr(d_loneliness$yi, which = 'ni')
+
+RunAnalysis(
+  d_loneliness, 
+  outcome_description = "Loneliness",
+  outcome_measure = "loneliness_measure_cont"
+)
+
+rm(d_loneliness)
+
+```
+
+*\## Loneliness: Loneliness Categorical*
+
+```{r}
+
+d_loneliness_cat <-
+  try({
+    metafor::escalc(
+      ai = loneliness_counts_int_categ,
+      bi = loneliness_n_int_categ - loneliness_counts_int_categ,
+      ci = loneliness_counts_comp_categ,
+      di = loneliness_n_comp_categ - loneliness_counts_comp_categ,
+      measure = "RR",
+      add = TRUE,
+      data = d
+    )
+  })
+
+
+
+d_loneliness_cat$ni <- attr(d_loneliness_cat$yi, which = 'ni')
+
+RunAnalysis(
+  d_loneliness_cat, 
+  outcome_description = "Loneliness Categorical",
+  outcome_measure = "loneliness_measure_categ",
+  categorical = TRUE
+)
+
+rm(d_loneliness_cat)
+
+
+```
+
+*\## Suicide Continuous*
+
+```{r}
+d_suicide <- metafor::escalc(
+  m1i = suicide_mean_int_cont,
+  sd1i = suicide_SD_int_cont,
+  n1i = suicide_n_int_cont,
+  m2i = suicide_mean_comp_cont,
+  sd2i = suicide_SD_comp_cont,
+  n2i = suicide_n_comp_cont,
+  append = TRUE,
+  measure = "SMD",
+  data = d
+)
+
+
+d_suicide$ni <- attr(d_suicide$yi, which = 'ni')
+
+RunAnalysis(
+  d_suicide, 
+  outcome_description = "Suicide Continuous",
+  outcome_measure = "suicide_measure_cont"
+)
+
+rm(d_suicide)
+
+```
+
+*\## Suicide categorical*
+
+```{r}
+d_suicide_cat <-
+  metafor::escalc(
+    ai = suicide_counts_int_categ,
+    bi = suicide_n_int_categ - suicide_counts_int_categ,
+    ci = suicide_counts_comp_categ,
+    di = suicide_n_comp_categ - suicide_counts_comp_categ,
+    measure = "RR",
+    add = TRUE,
+    data = d
+  )
+d_suicide_cat$ni <- attr(d_suicide_cat$yi, which = 'ni')
+
+
+RunAnalysis(
+  d_suicide_cat, 
+  outcome_description = "Suicide Categorical",
+  outcome_measure = "suicide_measure_categ",
+  categorical = TRUE
+)
+
+rm(d_suicide_cat)
+```
+
+*\## Adverse health behaviors - Continuous*
+
+```{r}
+d_adverse_health <- metafor::escalc(
+  m1i = adverse_health_mean_int_cont,
+  sd1i = adverse_health_SD_int_cont,
+  n1i = adverse_health_n_int_cont,
+  m2i = adverse_health_mean_comp_cont,
+  sd2i = adverse_health_SD_comp_cont,
+  n2i = adverse_health_n_comp_cont,
+  append = TRUE,
+  measure = "SMD",
+  data = d
+)
+
+d_adverse_health$ni <- attr(d_adverse_health$yi, which = 'ni')
+
+
+
+RunAnalysis(
+  d_adverse_health, 
+  outcome_description = "Adverse Health Behaviors - Continuous",
+  outcome_measure = "adverse_health_measure_cont"
+)
+
+rm(d_adverse_health)
+
+
+```
+
+*\## Adverse health behaviors - Categorical*
+
+```{r}
+
+d_adverse_health_cat <-
+  metafor::escalc(
+    ai = adverse_health_counts_int_categ,
+    bi = 
+      adverse_health_n_int_categ - adverse_health_counts_int_categ,
+    ci = adverse_health_counts_comp_categ,
+    di = adverse_health_n_comp_categ - adverse_health_counts_comp_categ,
+    measure = "RR",
+    add = TRUE,
+    data = d
+  )
+
+d_adverse_health_cat$ni <- attr(d_adverse_health_cat$yi, which = 'ni')
+
+
+RunAnalysis(
+  d_adverse_health_cat, 
+  outcome_description = "Adverse Health Behaviors - Categorical",
+  outcome_measure = "adverse_health_measure_categ",
+  categorical = TRUE
+)
+
+rm(d_adverse_health_cat)
+```
+
+*\## Depression Continuous*
+
+```{r}
+d_depression_symp <- metafor::escalc(
+  m1i = depression_symp_mean_int_cont,
+  sd1i = depression_symp_SD_int_cont,
+  n1i = depression_symp_n_int_cont,
+  m2i = depression_symp_mean_comp_cont,
+  sd2i = depression_symp_SD_comp_cont,
+  n2i = depression_symp_n_comp_cont,
+  append = TRUE,
+  measure = "SMD",
+  data = d
+)
+
+d_depression_symp$ni <- attr(d_depression_symp$yi, which = 'ni')
+
+
+d_depression_symp$yi <- ifelse(
+  d_depression_symp$depression_symp_value  == "Higher is better", 
+  d_depression_symp$yi * -1,
+  d_depression_symp$yi
+)
+
+RunAnalysis(
+  current_data = d_depression_symp, 
+  outcome_description = "Depression - Continuous",
+  outcome_measure = "depression_symp_measure_cont"
+)
+
+rm(d_depression_symp)
+```
+
+*\## Depression Categorical*
+
+```{r}
+d_depression_symp_cat <-
+  metafor::escalc(
+    ai = depression_symp_counts_int_categ,
+    bi = depression_symp_n_int_categ - depression_symp_counts_int_categ,
+    ci = depression_symp_counts_comp_categ,
+    di = depression_symp_n_comp_categ - depression_symp_counts_comp_categ,
+    measure = "RR",
+    add = TRUE,
+    data = d
+  )
+
+d_depression_symp_cat$ni <- attr(d_depression_symp_cat$yi, which = 'ni')
+
+
+RunAnalysis(
+  d_depression_symp_cat, 
+  outcome_description = "Depression - Categorical",
+  outcome_measure = "depression_symp_measure_categ",
+  categorical = TRUE
+)
+
+rm(d_depression_symp_cat)
+```
+
+*\## Substance use*
+
+*No substance use?*
+
+*\## Unintended consequences: AE*
+
+*No unintended*
+
+*\#*
+
+*\## Substance use*
+
+*No substance use?*
+
+*\## Unintended consequences: AE*
+
+*No unintended*
